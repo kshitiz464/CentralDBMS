@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Turf Manager Dashboard</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            padding: 20px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+
+        th,
+        td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: center;
+        }
+
+        th {
+            background-color: #f2f2f2;
+        }
+
+        .booked {
+            background-color: #ffcccc;
+        }
+
+        .available {
+            background-color: #ccffcc;
+        }
+
+        /* New style for data not found/inferred */
+        .nodata {
+            background-color: #f9f9f9;
+            color: #999;
+        }
+
+        .locked {
+            background-color: #dcdcdc;
+            /* Light Grey */
+            color: #555;
+            font-style: italic;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Turf Management Dashboard</h1>
+    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px;">
+        <!-- Left Side: Date and Load -->
+        <div>
+            <label for="date-picker" style="font-weight: bold;">Date:</label>
+            <input type="date" id="date-picker" onchange="loadData(false)"
+                style="padding: 5px; border-radius: 4px; border: 1px solid #ccc;">
+            <button onclick="loadData(true)"
+                style="padding: 5px 15px; margin-left: 10px; cursor: pointer; background-color: #007bff; color: white; border: none; border-radius: 4px;">Load
+                (Force Refresh)</button>
+        </div>
+
+        <!-- Right Side: Filter -->
+        <div>
+            <label for="sport-filter" style="font-weight: bold;">Filter Sport:</label>
+            <select id="sport-filter" onchange="applyFilter()"
+                style="padding: 5px; border-radius: 4px; border: 1px solid #ccc;">
+                <option value="All">All Sports</option>
+                <option value="Badminton Wooden+Mat">Badminton</option>
+                <option value="Table Tennis">Table Tennis</option>
+                <option value="Snooker">Snooker</option>
+                <option value="Pool">Pool</option>
+                <option value="Box Cricket 6 a Side">Box Cricket</option>
+                <option value="Football 5 a Side">Football</option>
+            </select>
+        </div>
+    </div>
+
+    <div id="calendar-container">
+        <!-- Grid will be generated here -->
+    </div>
+
+    <div id="loading-overlay" class="loading-overlay" style="display: none;">
+        <div class="spinner"></div>
+        <h2 style="color: white; margin-top: 20px;">Processing Booking...</h2>
+    </div>
+
+    <style>
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 9999;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .spinner {
+            border: 8px solid #f3f3f3;
+            border-top: 8px solid #3498db;
+            border-radius: 50%;
+            width: 60px;
+            height: 60px;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+    </style>
+
+    <script>
+        document.getElementById('date-picker').valueAsDate = new Date();
+        let currentBookings = []; // Global store
+
+        async function loadData(force = false) {
+            const dateInput = document.getElementById('date-picker');
+            const date = dateInput.value;
+            const container = document.getElementById('calendar-container');
+            const btn = document.querySelector('button');
+            const filterSelect = document.getElementById('sport-filter');
+
+            // Show loading state
+            container.innerHTML = '<h3 style="text-align:center; color: #666;">Loading data... Please wait up to 90 seconds.</h3>';
+            btn.disabled = true;
+            dateInput.disabled = true;
+            filterSelect.disabled = true;
+            btn.innerText = "Loading...";
+
+            try {
+                // Add force=true param if requested
+                let url = `/dashboard-data?date=${date}`;
+                if (force) url += `&force=true`;
+
+                const response = await fetch(url);
+                const data = await response.json();
+                currentBookings = data.bookings; // Save global
+                applyFilter(); // Render with current filter
+            } catch (error) {
+                console.error("Error fetching data:", error);
+                container.innerHTML = '<h3 style="text-align:center; color: red;">Failed to load data. Is the server running?</h3>';
+                alert("Failed to load data. Is the local server running?");
+            } finally {
+                btn.disabled = false;
+                dateInput.disabled = false;
+                filterSelect.disabled = false;
+                btn.innerText = "Load";
+            }
+        }
+
+        function applyFilter() {
+            const sport = document.getElementById('sport-filter').value;
+            renderGrid(currentBookings, sport);
+        }
+
+        function renderGrid(bookings, filterSport) {
+            // 1. Define Enforced Structure and Order
+            const sportOrder = [
+                "Badminton Wooden+Mat",
+                "Table Tennis",
+                "Snooker",
+                "Pool",
+                "Box Cricket 6 a Side",
+                "Football 5 a Side"
+            ];
+
+            // Define Courts per sport to fill gaps exactly as user wants
+            const sportCourts = {
+                "Badminton Wooden+Mat": ["Court 1", "Court 2", "Court 3", "Court 4"],
+                "Table Tennis": ["Table 1"],
+                "Snooker": ["Table 1"],
+                "Pool": ["Table 1"],
+                "Box Cricket 6 a Side": ["Turf 1"],
+                "Football 5 a Side": ["Turf 1"]
+            };
+
+            // 2. Identify Unique Times found in DB
+            const distinctTimes = [...new Set(bookings.map(b => b.time))].sort();
+
+            // Helper to format 24h to 12h
+            const formatTime = (timeStr) => {
+                if (!timeStr) return "-";
+                const parts = timeStr.split(':');
+                if (parts.length < 2) return timeStr;
+                let hour = parseInt(parts[0]);
+                const min = parts[1];
+                const ampm = hour >= 12 ? 'PM' : 'AM';
+                hour = hour % 12;
+                hour = hour ? hour : 12;
+                return `${hour}:${min} ${ampm}`;
+            };
+
+            let html = '<table><tr><th>Time</th><th>Status</th><th>Sport</th><th>Court</th><th>Source</th></tr>';
+
+            // Filter sportOrder based on selection
+            let activeSports = sportOrder;
+            if (filterSport && filterSport !== "All") {
+                activeSports = sportOrder.filter(s => s === filterSport);
+            }
+
+            if (distinctTimes.length === 0) {
+                html += '<tr><td colspan="5">No data available (or loading...).</td></tr>';
+            } else {
+                distinctTimes.forEach(time => {
+                    const timeDisplay = formatTime(time);
+
+                    // Iterate Active Sports
+                    activeSports.forEach(sport => {
+                        const courts = sportCourts[sport] || ["Standard"];
+
+                        courts.forEach(courtName => {
+                            // Try to find matching booking
+                            // We trim to handle potential whitespace differences
+                            const match = bookings.find(b =>
+                                b.time === time &&
+                                b.sport.trim().toLowerCase() === sport.trim().toLowerCase() &&
+                                (b.court.trim().toLowerCase() === courtName.trim().toLowerCase() || b.court.toLowerCase().includes(courtName.split(' ')[1].toLowerCase()))
+                            );
+
+                            let status = "N/A"; // Changed from "Booked" to "N/A" for clarity
+                            let source = "System"; // Changed from "-" to "System"
+                            let className = "nodata"; // Changed from "booked" to "nodata"
+                            let dbCourtName = courtName;
+
+                            if (match) {
+                                status = match.status;
+                                if (status === 'Booked') {
+                                    className = 'booked';
+                                } else if (status === 'Available') {
+                                    className = 'available';
+                                } else if (status === 'Locked') {
+                                    className = 'locked';
+                                } else {
+                                    className = 'nodata';
+                                }
+                                source = match.source;
+                                dbCourtName = match.court || courtName;
+                            }
+
+                            // Add Click action only for Available slots
+                            let clickAction = "";
+                            if (className === 'available') {
+                                clickAction = `onclick="bookSlot('${time}', '${sport}', '${dbCourtName}')" style="cursor: pointer;" title="Click to Book"`;
+                            }
+
+                            html += `<tr ${clickAction}>
+                                <td>${timeDisplay}</td>
+                                <td class="${className}">${status}</td>
+                                <td>${sport}</td>
+                                <td>${dbCourtName}</td>
+                                <td>${source}</td>
+                            </tr>`;
+                        });
+                    });
+                });
+            }
+            html += '</table>';
+            document.getElementById('calendar-container').innerHTML = html;
+        }
+
+        async function bookSlot(time, sport, court) {
+            const date = document.getElementById('date-picker').value;
+
+            // 1. Collect Details
+            const name = prompt("Enter Customer Name:", "Walk-in");
+            if (name === null) return; // Cancelled
+
+            const phone = prompt("Enter Customer Phone:", "");
+            if (phone === null) return;
+
+            const email = prompt("Enter Customer Email (for Playo):", "walkin@example.com");
+            if (email === null) return;
+
+            if (!confirm(`Confirm booking for ${sport} (${court}) at ${time}?\n\nCustomer: ${name}\nPhone: ${phone}`)) {
+                return;
+            }
+
+            // SHOW LOADING
+            const overlay = document.getElementById('loading-overlay');
+            overlay.style.display = 'flex';
+
+            try {
+                const response = await fetch('/api/book', { // Generic endpoint name
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        date: date,
+                        time: time,
+                        source: "Dashboard",
+                        sport: sport,
+                        court: court,
+                        customer_name: name,
+                        customer_phone: phone,
+                        customer_email: email
+                    })
+                });
+
+                if (response.ok) {
+                    alert("Success! Slot blocked. Refreshing data...");
+                    loadData(); // Reload to see the change
+                } else {
+                    const err = await response.json();
+                    alert("Failed: " + (err.detail || "Unknown error"));
+                }
+            } catch (error) {
+                console.error("Booking error:", error);
+                alert("Error connecting to server.");
+            } finally {
+                // HIDE LOADING
+                overlay.style.display = 'none';
+            }
+        }
+
+        // Initial load
+        loadData();
+    </script>
+</body>
+
+</html>
