@@ -65,18 +65,29 @@
         </div>
 
         <!-- Right Side: Filter -->
-        <div>
-            <label for="sport-filter" style="font-weight: bold;">Filter Sport:</label>
-            <select id="sport-filter" onchange="applyFilter()"
-                style="padding: 5px; border-radius: 4px; border: 1px solid #ccc;">
-                <option value="All">All Sports</option>
-                <option value="Badminton Wooden+Mat">Badminton</option>
-                <option value="Table Tennis">Table Tennis</option>
-                <option value="Snooker">Snooker</option>
-                <option value="Pool">Pool</option>
-                <option value="Box Cricket 6 a Side">Box Cricket</option>
-                <option value="Football 5 a Side">Football</option>
-            </select>
+        <div style="display: flex; gap: 15px;">
+            <div>
+                <label for="source-filter" style="font-weight: bold;">Source:</label>
+                <select id="source-filter" onchange="loadData(false)"
+                    style="padding: 5px; border-radius: 4px; border: 1px solid #ccc;">
+                    <option value="all">All Sources</option>
+                    <option value="playo">Playo</option>
+                    <option value="hudle">Hudle</option>
+                </select>
+            </div>
+            <div>
+                <label for="sport-filter" style="font-weight: bold;">Filter Sport:</label>
+                <select id="sport-filter" onchange="applyFilter()"
+                    style="padding: 5px; border-radius: 4px; border: 1px solid #ccc;">
+                    <option value="All">All Sports</option>
+                    <option value="Badminton Premium Hybrid">Badminton (Hybrid)</option>
+                    <option value="Badminton Synthetic">Badminton (Synthetic)</option>
+                    <option value="Snooker">Snooker</option>
+                    <option value="Pool 8 Ball">Pool</option>
+                    <option value="Box Cricket 7 a side">Box Cricket</option>
+                    <option value="Football 7 a side">Football</option>
+                </select>
+            </div>
         </div>
     </div>
 
@@ -131,20 +142,23 @@
         async function loadData(force = false) {
             const dateInput = document.getElementById('date-picker');
             const date = dateInput.value;
+            const source = document.getElementById('source-filter').value;
             const container = document.getElementById('calendar-container');
             const btn = document.querySelector('button');
             const filterSelect = document.getElementById('sport-filter');
+            const sourceSelect = document.getElementById('source-filter');
 
             // Show loading state
             container.innerHTML = '<h3 style="text-align:center; color: #666;">Loading data... Please wait up to 90 seconds.</h3>';
             btn.disabled = true;
             dateInput.disabled = true;
             filterSelect.disabled = true;
+            sourceSelect.disabled = true;
             btn.innerText = "Loading...";
 
             try {
                 // Add force=true param if requested
-                let url = `/dashboard-data?date=${date}`;
+                let url = `/dashboard-data?date=${date}&source=${source}`;
                 if (force) url += `&force=true`;
 
                 const response = await fetch(url);
@@ -159,6 +173,7 @@
                 btn.disabled = false;
                 dateInput.disabled = false;
                 filterSelect.disabled = false;
+                sourceSelect.disabled = false;
                 btn.innerText = "Load";
             }
         }
@@ -171,22 +186,24 @@
         function renderGrid(bookings, filterSport) {
             // 1. Define Enforced Structure and Order
             const sportOrder = [
-                "Badminton Wooden+Mat",
-                "Table Tennis",
+                "Badminton Premium Hybrid",
+                "Badminton Synthetic",
                 "Snooker",
-                "Pool",
-                "Box Cricket 6 a Side",
-                "Football 5 a Side"
+                "Snooker Pro",
+                "Pool 8 Ball",
+                "Box Cricket 7 a side",
+                "Football 7 a side"
             ];
 
             // Define Courts per sport to fill gaps exactly as user wants
             const sportCourts = {
-                "Badminton Wooden+Mat": ["Court 1", "Court 2", "Court 3", "Court 4"],
-                "Table Tennis": ["Table 1"],
-                "Snooker": ["Table 1"],
-                "Pool": ["Table 1"],
-                "Box Cricket 6 a Side": ["Turf 1"],
-                "Football 5 a Side": ["Turf 1"]
+                "Badminton Premium Hybrid": ["Court 1", "Court 2", "Court 3", "Court 4"],
+                "Badminton Synthetic": ["Court 1", "Court 2", "Court 3", "Court 4"],
+                "Snooker": ["Snooker Table 1", "Table 1"], // Added variations observed in DB
+                "Snooker Pro": ["Snooker Pro 1"],
+                "Pool 8 Ball": ["Pool Table 1", "Pool Table 2"],
+                "Box Cricket 7 a side": ["Turf 1", "Turf"], // Observed 'Turf' in verification
+                "Football 7 a side": ["Turf 1", "Turf"]
             };
 
             // 2. Identify Unique Times found in DB
@@ -226,11 +243,25 @@
                         courts.forEach(courtName => {
                             // Try to find matching booking
                             // We trim to handle potential whitespace differences
-                            const match = bookings.find(b =>
-                                b.time === time &&
-                                b.sport.trim().toLowerCase() === sport.trim().toLowerCase() &&
-                                (b.court.trim().toLowerCase() === courtName.trim().toLowerCase() || b.court.toLowerCase().includes(courtName.split(' ')[1].toLowerCase()))
-                            );
+                            const match = bookings.find(b => {
+                                if (b.time !== time) return false;
+                                if (b.sport.trim().toLowerCase() !== sport.trim().toLowerCase()) return false;
+
+                                const targetCourt = courtName.trim().toLowerCase();
+                                const bookingCourt = b.court.trim().toLowerCase();
+
+                                // Exact Match
+                                if (bookingCourt === targetCourt) return true;
+
+                                // Partial Match Logic (e.g. "Court 1" matches "Badminton Court 1"?)
+                                // Check if logic relies on splitting (e.g. "Court 1" -> "1")
+                                const parts = courtName.split(' ');
+                                if (parts.length > 1) {
+                                    const numberPart = parts[1].toLowerCase();
+                                    if (bookingCourt.includes(numberPart)) return true;
+                                }
+                                return false;
+                            });
 
                             let status = "N/A"; // Changed from "Booked" to "N/A" for clarity
                             let source = "System"; // Changed from "-" to "System"

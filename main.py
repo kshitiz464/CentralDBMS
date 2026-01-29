@@ -102,11 +102,12 @@ async def receive_booking(booking: BookingRequest):
         raise HTTPException(status_code=500, detail="Failed to block slot on external portal")
 
 @app.get("/dashboard-data")
-async def get_dashboard_data(date: str = None, force: bool = False):
+async def get_dashboard_data(date: str = None, force: bool = False, source: str = "all"):
     """
     Returns the unified calendar JSON.
     Also triggers on-demand scraping for the requested date.
     force=False respects cooldown (10m).
+    source="all"|"hudle"|"playo"
     """
     if not date:
         date = datetime.now().strftime("%Y-%m-%d")
@@ -115,10 +116,28 @@ async def get_dashboard_data(date: str = None, force: bool = False):
     if browser_sync:
         await browser_sync.request_date(date, force=force)
 
-    bookings = database.get_bookings(date)
+    bookings = []
+    
+    # Fetch from separated tables
+    if source in ["all", "hudle"]:
+        bookings.extend(database.get_bookings(date, "bookings_hudle"))
+    
+    if source in ["all", "playo"]:
+        bookings.extend(database.get_bookings(date, "bookings_playo"))
+        
+    # NOTE: Old 'bookings' table is currently ignored for reading
+    # If we want to include manual bookings that might still go there, 
+    # we should check where manual bookings go.
+    # Currently manual bookings go to 'bookings'.
+    # For now, let's include 'bookings' if source is 'all' to capture manual entries?
+    # Or should manual entries just go to their own place?
+    # Let's keep reading 'bookings' for backward compatibility of manual entries.
+    if source == "all":
+         bookings.extend(database.get_bookings(date, "bookings"))
+
     return {
         "date": date,
-        "bookings": [b.dict() for b in bookings]
+        "bookings": [b.model_dump() for b in bookings]
     }
 
 if __name__ == "__main__":

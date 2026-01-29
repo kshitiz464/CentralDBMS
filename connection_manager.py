@@ -66,7 +66,7 @@ class ConnectionManager:
             url = page.url
             if "playo.club" in url:
                 self.playo_tab = page
-            elif "hudle.in" in url:
+            elif "partner.hudle.in" in url:
                 self.hudle_tab = page
 
         if not self.playo_tab:
@@ -77,7 +77,7 @@ class ConnectionManager:
         if not self.hudle_tab:
             logger.info("Hudle tab not found. Opening...")
             self.hudle_tab = await self.context.new_page()
-            await self.hudle_tab.goto("https://hudle.in/")
+            await self.hudle_tab.goto("https://partner.hudle.in/")
             
         return True
 
