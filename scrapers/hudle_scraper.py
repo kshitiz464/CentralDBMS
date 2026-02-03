@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import random
 from typing import List, Dict, Any
 from playwright.async_api import Page
 import database
@@ -26,14 +27,19 @@ class HudleScraper(BaseScraper):
     async def scrape(self, page: Page, scrape_requests: list) -> None:
         """
         Executes Hudle API scraping for requested dates.
+        Fetches ALL sports concurrently for a given date for maximum speed.
         """
         logger.info(f"HudleScraper started with {len(scrape_requests)} requests.")
         
         for req in scrape_requests:
             date_str = req['date']
-            # Hudle API handles specific sports via ID, so we iterate config
-            
-            for sport_id, sport_name_debug in self.sports_config:
+            tasks = []
+
+            async def _scrape_single_sport(sport_id, sport_name_debug):
+                # Micro-stagger for API safety (0.1s to 1.5s) to look organic-ish
+                stagger = random.uniform(0.1, 1.5)
+                await asyncio.sleep(stagger)
+
                 try:
                     # 1. Fetch JSON via Browser Context
                     result = await self._fetch_hudle_api(page, self.VENUE_ID, date_str, sport_id)
@@ -42,11 +48,11 @@ class HudleScraper(BaseScraper):
                         status_code = result.get("status") if result else "N/A"
                         if status_code != 404: # 404 might just mean no slots
                             logger.warning(f"Hudle Fetch Failed for {date_str} {sport_name_debug}: Status={status_code}")
-                        continue
+                        return
 
                     json_data = result.get("data")
                     if not json_data:
-                        continue
+                        return
 
                     # 2. Parse & Save
                     slots = self._parse_hudle_response(json_data, date_str, sport_id)
@@ -56,7 +62,17 @@ class HudleScraper(BaseScraper):
                         logger.info(f"Saved {len(slots)} slots for Hudle {date_str} ({sport_name_debug})")
 
                 except Exception as e:
-                    logger.error(f"Error scraping Hudle date {date_str} {sport_name_debug}: {e}")
+                    logger.error(f"Error scraping Hudle {date_str} - {sport_name_debug}: {str(e)}")
+
+            # Create tasks for all sports
+            for sport_id, sport_name_debug in self.sports_config:
+                tasks.append(_scrape_single_sport(sport_id, sport_name_debug))
+            
+            # Execute in parallel
+            if tasks:
+                await asyncio.gather(*tasks)
+            
+            logger.info(f"Scrape completed for Hudle {date_str}")
 
     async def _fetch_hudle_api(self, page: Page, venue_id: str, date_str: str, sport_id: str) -> Dict:
         url = f"https://api.hudle.in/api/v1/venues/{venue_id}/slots?view_type=1&date={date_str}&sport={sport_id}&grid=1"
@@ -125,10 +141,12 @@ class HudleScraper(BaseScraper):
                     else:
                         sport_name = "Badminton Synthetic"
 
-                elif sport_id == "8":
+                elif sport_id == "8":  # Football
                     sport_name = "Football 7 a side"
-                elif sport_id == "24":
+                    mapped_court_name = "Turf 1"  # Standardize to match Playo
+                elif sport_id == "24":  # Box Cricket
                     sport_name = "Box Cricket 7 a side"
+                    mapped_court_name = "Turf 1"  # Standardize to match Playo
                 elif sport_id == "5": # Billiard
                     if "pool" in court_lower:
                         sport_name = "Pool 8 Ball"
@@ -136,15 +154,15 @@ class HudleScraper(BaseScraper):
                         pool_counter += 1
                     elif "pro" in court_lower:
                          sport_name = "Snooker Pro"
-                         mapped_court_name = f"Snooker Pro {snooker_pro_counter}"
+                         mapped_court_name = "Table 1"  # Simplified naming
                          snooker_pro_counter += 1
                     elif "snooker" in court_lower:
                         sport_name = "Snooker"
-                        mapped_court_name = f"Snooker Table {snooker_counter}"
+                        mapped_court_name = "Table 1"  # Match Playo format
                         snooker_counter += 1
                     else:
                         sport_name = "Snooker"
-                        mapped_court_name = f"Snooker Table {snooker_counter}"
+                        mapped_court_name = "Table 1"  # Match Playo format
                         snooker_counter += 1
                 # --- MAPPING LOGIC END ---
 

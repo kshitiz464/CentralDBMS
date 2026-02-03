@@ -5,3 +5,5 @@ httpx
 websockets
 pydantic
 aiofiles
+python-dotenv
+slowapi

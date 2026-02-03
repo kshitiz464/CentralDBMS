@@ -9,7 +9,7 @@ class BaseScraper(ABC):
         pass
 
     @abstractmethod
-    async def scrape(self, page: Page, scrape_requests: List[Dict[str, Any]]) -> None:
+    async def scrape(self, page: Page, scrape_requests: List[Dict[str, Any]]) -> Any:
         """
         Executes the scraping logic.
         :param page: Playwright Page object (tab).

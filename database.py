@@ -57,11 +57,13 @@ def init_db():
         cursor.execute("PRAGMA journal_mode=WAL;")
         
         # Check if table exists to decide on migration (Simplified logic here)
+        # Check if table exists to decide on migration (Simplified logic here)
         try:
             cursor.execute("SELECT court FROM bookings LIMIT 1")
         except sqlite3.OperationalError:
-            logger.warning("Updating DB schema: Dropping old bookings table.")
-            cursor.execute("DROP TABLE IF EXISTS bookings")
+            pass # Table doesn't exist or schema mismatch, create below will handle IF NOT EXISTS
+            # In a real app, we would use Alembic for migrations.
+
 
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS bookings (
@@ -95,11 +97,47 @@ def init_db():
                 )
             ''')
 
+        # Create Status Tracking Table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS scrape_status (
+                source TEXT NOT NULL,
+                date TEXT NOT NULL,
+                last_updated TEXT,
+                status TEXT NOT NULL, -- 'success', 'failed'
+                details TEXT,
+                PRIMARY KEY (source, date)
+            )
+        ''')
+
         conn.commit()
         conn.close()
-        logger.info("Database initialized (WAL Mode + Split Tables).")
+        logger.info("Database initialized (WAL Mode + Split Tables + Status Tracking).")
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
+
+def update_scrape_status(source: str, date: str, status: str, details: str = None):
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cursor.execute('''
+                INSERT OR REPLACE INTO scrape_status (source, date, last_updated, status, details)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (source, date, timestamp, status, details))
+    except Exception as e:
+        logger.error(f"Error updating scrape status: {e}")
+
+def get_scrape_status(date: str) -> dict:
+    try:
+        with get_db_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM scrape_status WHERE date = ?', (date,))
+            rows = cursor.fetchall()
+            return {row['source']: dict(row) for row in rows}
+    except Exception as e:
+        logger.error(f"Error getting scrape status: {e}")
+        return {}
 
 def add_booking(booking: Booking):
     try:
@@ -166,13 +204,42 @@ async def save_booked_slots_hudle(slots: List[dict]):
 async def save_booked_slots_playo(slots: List[dict]):
     await _save_slots_to_table(slots, "bookings_playo")
 
+def delete_slots_for_date_sport(table_name: str, date: str, sport: str):
+    """
+    Delete all slots for a specific date and sport.
+    This ensures stale data is cleared before inserting fresh data.
+    """
+    if table_name not in ["bookings", "bookings_hudle", "bookings_playo"]:
+        logger.error(f"Invalid table name: {table_name}")
+        return
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f'DELETE FROM {table_name} WHERE date = ? AND sport = ?', (date, sport))
+            deleted = cursor.rowcount
+            if deleted > 0:
+                logger.debug(f"Cleared {deleted} old slots from {table_name} for {date} {sport}")
+    except Exception as e:
+        logger.error(f"Error clearing slots: {e}")
+
 async def _save_slots_to_table(slots: List[dict], table_name: str):
     """
     Internal helper to bulk upsert slots to a specific table.
+    Clears old data for the date/sport first to ensure fresh data.
     Uses Transaction to ensure all slots are saved or none (Atomicity).
     """
     if not slots:
         return
+    
+    # Group slots by date/sport to clear old data
+    date_sport_pairs = set()
+    for s in slots:
+        date_sport_pairs.add((s.get("date"), s.get("sport")))
+    
+    # Clear old data for each date/sport combination
+    for date, sport in date_sport_pairs:
+        if date and sport:
+            delete_slots_for_date_sport(table_name, date, sport)
         
     try:
         with get_db_connection() as conn:
@@ -197,3 +264,4 @@ async def _save_slots_to_table(slots: List[dict], table_name: str):
             
     except Exception as e:
         logger.error(f"Error in _save_slots_to_table ({table_name}): {e}")
+

@@ -5,6 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Turf Manager Dashboard</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
     <style>
         body {
             font-family: sans-serif;
@@ -48,11 +49,173 @@
             color: #555;
             font-style: italic;
         }
+
+        /* Cancel Modal Styles */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 10000;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .modal-content {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            width: 400px;
+            max-width: 90%;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+
+        .modal-header h2 {
+            margin: 0;
+            font-size: 20px;
+            color: #333;
+        }
+
+        .modal-close {
+            background: none;
+            border: none;
+            font-size: 24px;
+            cursor: pointer;
+            color: #666;
+        }
+
+        .modal-body p {
+            color: #666;
+            margin-bottom: 16px;
+        }
+
+        .refund-label {
+            font-size: 12px;
+            color: #888;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .refund-options {
+            display: flex;
+            gap: 24px;
+            margin-bottom: 16px;
+        }
+
+        .refund-option {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+        }
+
+        .refund-option input {
+            accent-color: #3b82f6;
+        }
+
+        .sms-option {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 24px;
+        }
+
+        .sms-option input {
+            width: 18px;
+            height: 18px;
+            accent-color: #3b82f6;
+        }
+
+        .modal-buttons {
+            display: flex;
+            justify-content: flex-end;
+            gap: 12px;
+        }
+
+        .btn-cancel {
+            padding: 10px 24px;
+            border: 1px solid #ddd;
+            background: white;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+
+        .btn-confirm {
+            padding: 10px 24px;
+            border: none;
+            background: #3b82f6;
+            color: white;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+
+        .btn-confirm:hover {
+            background: #2563eb;
+        }
+
+        .form-group {
+            margin-bottom: 16px;
+        }
+
+        .form-group label {
+            display: block;
+            font-size: 12px;
+            color: #666;
+            font-weight: 600;
+            margin-bottom: 6px;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 14px;
+            box-sizing: border-box;
+        }
+
+        .form-group input:focus {
+            outline: none;
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+        }
+
+        .warning-banner {
+            background-color: #fee2e2;
+            border: 1px solid #ef4444;
+            color: #b91c1c;
+            padding: 10px 15px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            display: none;
+        }
     </style>
 </head>
 
 <body>
     <h1>Turf Management Dashboard</h1>
+    <div id="status-warning" class="warning-banner"></div>
+
+    <!-- Security Overlay when Locked -->
+    <div id="lock-overlay"
+        style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 1000; color: white; flex-direction: column; align-items: center; justify-content: center; text-align: center;">
+        <h1 style="color: #ff4444; font-size: 3em;">SYSTEM LOCKED</h1>
+        <p>Emergency Stop has been activated. Operations are frozen.</p>
+        <p>Please restart the server manually to unlock.</p>
+    </div>
+
     <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px;">
         <!-- Left Side: Date and Load -->
         <div>
@@ -64,8 +227,13 @@
                 (Force Refresh)</button>
         </div>
 
-        <!-- Right Side: Filter -->
-        <div style="display: flex; gap: 15px;">
+        <!-- Right Side: Filter and Panic Button -->
+        <div style="display: flex; gap: 15px; align-items: center;">
+            <button onclick="emergencyStop()"
+                style="background-color: #dc3545; color: white; border: none; padding: 8px 15px; border-radius: 4px; font-weight: bold; cursor: pointer;">
+                🛑 FREEZE SYSTEM
+            </button>
+            <div style="border-left: 1px solid #ccc; height: 30px; margin: 0 5px;"></div>
             <div>
                 <label for="source-filter" style="font-weight: bold;">Source:</label>
                 <select id="source-filter" onchange="loadData(false)"
@@ -88,7 +256,19 @@
                     <option value="Football 7 a side">Football</option>
                 </select>
             </div>
+            <div>
+                <label for="status-filter" style="font-weight: bold;">Filter Status:</label>
+                <select id="status-filter" onchange="applyFilter()"
+                    style="padding: 5px; border-radius: 4px; border: 1px solid #ccc;">
+                    <option value="All">All Statuses</option>
+                    <option value="Available">Available</option>
+                    <option value="Booked">Booked</option>
+                    <option value="Locked">Locked</option>
+                    <option value="N/A">N/A (System)</option>
+                </select>
+            </div>
         </div>
+    </div>
     </div>
 
     <div id="calendar-container">
@@ -98,6 +278,103 @@
     <div id="loading-overlay" class="loading-overlay" style="display: none;">
         <div class="spinner"></div>
         <h2 style="color: white; margin-top: 20px;">Processing Booking...</h2>
+    </div>
+
+    <!-- Cancel Booking Modal -->
+    <div id="cancel-modal" class="modal-overlay">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Cancel Booking</h2>
+                <button class="modal-close" onclick="closeCancelModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p>Are you sure you want to cancel the booking?</p>
+                <p id="cancel-slot-info" style="font-weight: bold; color: #333;"></p>
+
+                <div class="refund-label">REFUND</div>
+                <div class="refund-options">
+                    <label class="refund-option">
+                        <input type="radio" name="refund-type" value="1" checked>
+                        As per Policy
+                    </label>
+                    <label class="refund-option">
+                        <input type="radio" name="refund-type" value="2">
+                        Full Refund
+                    </label>
+                    <label class="refund-option">
+                        <input type="radio" name="refund-type" value="3">
+                        No Refund
+                    </label>
+                </div>
+
+                <label class="sms-option">
+                    <input type="checkbox" id="send-sms" checked>
+                    Send Cancellation SMS
+                </label>
+            </div>
+            <div class="modal-buttons">
+                <button class="btn-cancel" onclick="closeCancelModal()">Cancel</button>
+                <button class="btn-confirm" onclick="confirmCancellation()">Confirm</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Booking Modal -->
+    <div id="booking-modal" class="modal-overlay">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Book Slot</h2>
+                <button class="modal-close" onclick="closeBookingModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p id="booking-slot-info" style="font-weight: bold; color: #333; margin-bottom: 16px;"></p>
+
+                <div class="form-group">
+                    <label for="customer-name">Customer Name</label>
+                    <input type="text" id="customer-name" placeholder="Walk-in" value="Walk-in">
+                </div>
+
+                <div class="form-group">
+                    <label for="customer-phone">Phone Number</label>
+                    <input type="tel" id="customer-phone" placeholder="9876543210">
+                </div>
+
+                <div class="form-group">
+                    <label for="customer-email">Email (for Playo)</label>
+                    <input type="email" id="customer-email" placeholder="customer@example.com"
+                        value="walkin@example.com">
+                </div>
+            </div>
+            <div class="modal-buttons">
+                <button class="btn-cancel" onclick="closeBookingModal()">Cancel</button>
+                <button class="btn-confirm" onclick="confirmBooking()">Book Now</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Auth Modal (for initial login prompt) -->
+    <div id="auth-modal" class="modal-overlay">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Authentication Required</h2>
+            </div>
+            <div class="modal-body">
+                <p>Please enter the dashboard credentials:</p>
+
+                <div class="form-group">
+                    <label for="auth-username">Username</label>
+                    <input type="text" id="auth-username" placeholder="admin">
+                </div>
+
+                <div class="form-group">
+                    <label for="auth-password">Password</label>
+                    <input type="password" id="auth-password" placeholder="password">
+                </div>
+            </div>
+            <div class="modal-buttons">
+                <button class="btn-confirm" onclick="submitAuth()">Login</button>
+            </div>
+        </div>
     </div>
 
     <style>
@@ -139,6 +416,46 @@
         document.getElementById('date-picker').valueAsDate = new Date();
         let currentBookings = []; // Global store
 
+        // Initial Load
+        loadData();
+
+        // Start polling for system status (Security)
+        setInterval(checkSystemStatus, 5000);
+
+        async function emergencyStop() {
+            if (!confirm("⚠️ ARE YOU SURE? ⚠️\n\nThis will instantly FREEZE the entire system.\nNo bookings or cancellations will be possible until you manually restart the server.")) {
+                return;
+            }
+            try {
+                const response = await fetch('/api/emergency_stop', { method: 'POST' });
+                const result = await response.json();
+                if (result.status === "locked") {
+                    showLockOverlay();
+                }
+            } catch (error) {
+                console.error("Failed to trigger emergency stop:", error);
+                alert("Failed to stop system. Server might be unreachable.");
+            }
+        }
+
+        async function checkSystemStatus() {
+            try {
+                const response = await fetch('/api/system_status');
+                const data = await response.json();
+                if (data.locked) {
+                    showLockOverlay();
+                }
+            } catch (e) {
+                // Ignore errors during polling
+            }
+        }
+
+        function showLockOverlay() {
+            document.getElementById('lock-overlay').style.display = 'flex';
+            document.getElementById('date-picker').disabled = true;
+            document.querySelectorAll('button').forEach(b => b.disabled = true);
+        }
+
         async function loadData(force = false) {
             const dateInput = document.getElementById('date-picker');
             const date = dateInput.value;
@@ -162,13 +479,35 @@
                 if (force) url += `&force=true`;
 
                 const response = await fetch(url);
+                if (!response.ok) throw new Error("Network response was not ok");
                 const data = await response.json();
-                currentBookings = data.bookings; // Save global
-                applyFilter(); // Render with current filter
+
+                // Show status warnings
+                const statusDiv = document.getElementById('status-warning');
+                statusDiv.style.display = 'none';
+                statusDiv.textContent = '';
+
+                if (data.scrape_status) {
+                    const warnings = [];
+                    for (const [source, info] of Object.entries(data.scrape_status)) {
+                        if (info.status === 'failed') {
+                            warnings.push(`<strong>${source} sync failed:</strong> ${info.details || 'Unknown error'}`);
+                        }
+                    }
+
+                    if (warnings.length > 0) {
+                        statusDiv.innerHTML = warnings.join('<br>');
+                        statusDiv.style.display = 'block';
+                    }
+                }
+
+                currentBookings = data.bookings || [];
+                applyFilter();
             } catch (error) {
                 console.error("Error fetching data:", error);
-                container.innerHTML = '<h3 style="text-align:center; color: red;">Failed to load data. Is the server running?</h3>';
-                alert("Failed to load data. Is the local server running?");
+                container.innerHTML = '<h3 style="text-align:center; color: red;">Failed to load data. Is the server running? <br><small>Retrying in 5s...</small></h3>';
+                // Auto-retry after 5 seconds
+                setTimeout(() => loadData(false), 5000);
             } finally {
                 btn.disabled = false;
                 dateInput.disabled = false;
@@ -180,10 +519,11 @@
 
         function applyFilter() {
             const sport = document.getElementById('sport-filter').value;
-            renderGrid(currentBookings, sport);
+            const status = document.getElementById('status-filter').value;
+            renderGrid(currentBookings, sport, status);
         }
 
-        function renderGrid(bookings, filterSport) {
+        function renderGrid(bookings, filterSport, filterStatus) {
             // 1. Define Enforced Structure and Order
             const sportOrder = [
                 "Badminton Premium Hybrid",
@@ -199,11 +539,11 @@
             const sportCourts = {
                 "Badminton Premium Hybrid": ["Court 1", "Court 2", "Court 3", "Court 4"],
                 "Badminton Synthetic": ["Court 1", "Court 2", "Court 3", "Court 4"],
-                "Snooker": ["Snooker Table 1", "Table 1"], // Added variations observed in DB
-                "Snooker Pro": ["Snooker Pro 1"],
-                "Pool 8 Ball": ["Pool Table 1", "Pool Table 2"],
-                "Box Cricket 7 a side": ["Turf 1", "Turf"], // Observed 'Turf' in verification
-                "Football 7 a side": ["Turf 1", "Turf"]
+                "Snooker": ["Table 1"],
+                "Snooker Pro": ["Table 1"], // Simplified naming
+                "Pool 8 Ball": ["Table 1", "Table 2"],
+                "Box Cricket 7 a side": ["Turf 1"],
+                "Football 7 a side": ["Turf 1"]
             };
 
             // 2. Identify Unique Times found in DB
@@ -241,9 +581,8 @@
                         const courts = sportCourts[sport] || ["Standard"];
 
                         courts.forEach(courtName => {
-                            // Try to find matching booking
-                            // We trim to handle potential whitespace differences
-                            const match = bookings.find(b => {
+                            // Find ALL matching bookings (from both Playo and Hudle)
+                            const matchingBookings = bookings.filter(b => {
                                 if (b.time !== time) return false;
                                 if (b.sport.trim().toLowerCase() !== sport.trim().toLowerCase()) return false;
 
@@ -254,7 +593,6 @@
                                 if (bookingCourt === targetCourt) return true;
 
                                 // Partial Match Logic (e.g. "Court 1" matches "Badminton Court 1"?)
-                                // Check if logic relies on splitting (e.g. "Court 1" -> "1")
                                 const parts = courtName.split(' ');
                                 if (parts.length > 1) {
                                     const numberPart = parts[1].toLowerCase();
@@ -262,6 +600,23 @@
                                 }
                                 return false;
                             });
+
+                            // PRIORITY: Booked > Locked > Available
+                            // When same status, prefer Playo over Hudle (since Hudle is inactive)
+                            let match = null;
+                            if (matchingBookings.length > 0) {
+                                const statusPriority = { 'Booked': 1, 'Locked': 2, 'Available': 3 };
+                                const sourcePriority = { 'Playo': 1, 'Hudle': 2 }; // Prefer Playo
+
+                                matchingBookings.sort((a, b) => {
+                                    // First sort by status
+                                    const statusDiff = (statusPriority[a.status] || 99) - (statusPriority[b.status] || 99);
+                                    if (statusDiff !== 0) return statusDiff;
+                                    // Then by source (prefer Playo)
+                                    return (sourcePriority[a.source] || 99) - (sourcePriority[b.source] || 99);
+                                });
+                                match = matchingBookings[0];
+                            }
 
                             let status = "N/A"; // Changed from "Booked" to "N/A" for clarity
                             let source = "System"; // Changed from "-" to "System"
@@ -283,10 +638,18 @@
                                 dbCourtName = match.court || courtName;
                             }
 
-                            // Add Click action only for Available slots
+                            // Filtering Logic
+                            if (filterStatus && filterStatus !== "All" && status !== filterStatus) {
+                                return; // Skip rendering this row if status mismatch
+                            }
+
+                            // Add Click action for Available and Booked slots
                             let clickAction = "";
                             if (className === 'available') {
-                                clickAction = `onclick="bookSlot('${time}', '${sport}', '${dbCourtName}')" style="cursor: pointer;" title="Click to Book"`;
+                                clickAction = `onclick="bookSlot('${time}', '${sport}', '${dbCourtName}', '${source}')" style="cursor: pointer;" title="Click to Book on ${source}"`;
+                            } else if (className === 'booked' && source === 'Playo') {
+                                // Only Playo bookings can be cancelled via API
+                                clickAction = `onclick="cancelSlot('${time}', '${sport}', '${dbCourtName}', '${source}')" style="cursor: pointer;" title="Click to Cancel"`;
                             }
 
                             html += `<tr ${clickAction}>
@@ -304,29 +667,58 @@
             document.getElementById('calendar-container').innerHTML = html;
         }
 
-        async function bookSlot(time, sport, court) {
+        // Booking modal state
+        let pendingBooking = null;
+
+        function bookSlot(time, sport, court, source) {
             const date = document.getElementById('date-picker').value;
 
-            // 1. Collect Details
-            const name = prompt("Enter Customer Name:", "Walk-in");
-            if (name === null) return; // Cancelled
-
-            const phone = prompt("Enter Customer Phone:", "");
-            if (phone === null) return;
-
-            const email = prompt("Enter Customer Email (for Playo):", "walkin@example.com");
-            if (email === null) return;
-
-            if (!confirm(`Confirm booking for ${sport} (${court}) at ${time}?\n\nCustomer: ${name}\nPhone: ${phone}`)) {
+            // Source must be Playo or Hudle
+            if (!source || (source !== 'Playo' && source !== 'Hudle')) {
+                alert('Cannot determine booking platform. Please refresh and try again.');
                 return;
             }
+
+            // Store booking details for later
+            pendingBooking = { date, time, sport, court, source };
+
+            // Update modal info
+            document.getElementById('booking-slot-info').textContent =
+                `${source} - ${sport} (${court}) at ${time}`;
+
+            // Reset form
+            document.getElementById('customer-name').value = 'Walk-in';
+            document.getElementById('customer-phone').value = '';
+            document.getElementById('customer-email').value = 'walkin@example.com';
+
+            // Show modal
+            document.getElementById('booking-modal').style.display = 'flex';
+        }
+
+        function closeBookingModal() {
+            document.getElementById('booking-modal').style.display = 'none';
+            pendingBooking = null;
+        }
+
+        async function confirmBooking() {
+            if (!pendingBooking) return;
+
+            const { date, time, sport, court, source } = pendingBooking;
+
+            // Get form values
+            const name = document.getElementById('customer-name').value || 'Walk-in';
+            const phone = document.getElementById('customer-phone').value;
+            const email = document.getElementById('customer-email').value || 'walkin@example.com';
+
+            // Close modal
+            closeBookingModal();
 
             // SHOW LOADING
             const overlay = document.getElementById('loading-overlay');
             overlay.style.display = 'flex';
 
             try {
-                const response = await fetch('/api/book', { // Generic endpoint name
+                const response = await fetch('/api/book', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
@@ -334,7 +726,7 @@
                     body: JSON.stringify({
                         date: date,
                         time: time,
-                        source: "Dashboard",
+                        source: source,
                         sport: sport,
                         court: court,
                         customer_name: name,
@@ -344,8 +736,8 @@
                 });
 
                 if (response.ok) {
-                    alert("Success! Slot blocked. Refreshing data...");
-                    loadData(); // Reload to see the change
+                    alert("Success! Slot booked. Refreshing data...");
+                    loadData(true); // Force fresh data from Playo
                 } else {
                     const err = await response.json();
                     alert("Failed: " + (err.detail || "Unknown error"));
@@ -358,6 +750,107 @@
                 overlay.style.display = 'none';
             }
         }
+
+        // Cancel modal state
+        let pendingCancel = null;
+
+        function cancelSlot(time, sport, court, source) {
+            const date = document.getElementById('date-picker').value;
+
+            // Store cancel details for later
+            pendingCancel = { date, time, sport, court, source };
+
+            // Update modal info
+            document.getElementById('cancel-slot-info').textContent =
+                `${sport} (${court}) at ${time}`;
+
+            // Reset form to defaults
+            document.querySelector('input[name="refund-type"][value="1"]').checked = true;
+            document.getElementById('send-sms').checked = true;
+
+            // Show modal
+            document.getElementById('cancel-modal').style.display = 'flex';
+        }
+
+        function closeCancelModal() {
+            document.getElementById('cancel-modal').style.display = 'none';
+            pendingCancel = null;
+        }
+
+        async function confirmCancellation() {
+            if (!pendingCancel) return;
+
+            const { date, time, sport, court, source } = pendingCancel;
+
+            // Get selected options
+            const refundType = document.querySelector('input[name="refund-type"]:checked').value;
+            const sendSms = document.getElementById('send-sms').checked;
+
+            // Close modal
+            closeCancelModal();
+
+            // SHOW LOADING
+            const overlay = document.getElementById('loading-overlay');
+            overlay.style.display = 'flex';
+
+            try {
+                const response = await fetch('/api/cancel', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        date: date,
+                        time: time,
+                        source: source,
+                        sport: sport,
+                        court: court,
+                        refund_type: parseInt(refundType),
+                        send_sms: sendSms
+                    })
+                });
+
+                if (response.ok) {
+                    alert("Success! Booking cancelled. Refreshing data...");
+                    loadData(true); // Force fresh data from Playo
+                } else {
+                    const err = await response.json();
+                    alert("Failed: " + (err.detail || "Unknown error"));
+                }
+            } catch (error) {
+                console.error("Cancel error:", error);
+                alert("Error connecting to server.");
+            } finally {
+                // HIDE LOADING
+                overlay.style.display = 'none';
+            }
+        }
+
+        // Auth modal functions (for future use)
+        function showAuthModal() {
+            document.getElementById('auth-modal').style.display = 'flex';
+        }
+
+        function closeAuthModal() {
+            document.getElementById('auth-modal').style.display = 'none';
+        }
+
+        function submitAuth() {
+            const username = document.getElementById('auth-username').value;
+            const password = document.getElementById('auth-password').value;
+            // TODO: Implement actual authentication
+            console.log('Auth submitted:', username);
+            closeAuthModal();
+        }
+
+        // Close modals on Escape key
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                closeBookingModal();
+                closeCancelModal();
+                closeAuthModal();
+            }
+        });
 
         // Initial load
         loadData();

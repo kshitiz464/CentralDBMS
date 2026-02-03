@@ -1,4 +1,23 @@
-venv
-bookings.db
+# Environment & Local Settings
 .env
-__pycache__
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Logs
+logs/
+access.log
+*.log
+
+# Database
+bookings.db
+*.sqlite
+*.sqlite3
+
+# Development Tools & Scripts (Local only)
+dev_tools/
+
+# Browser profiles
+chrome-debug-profile/

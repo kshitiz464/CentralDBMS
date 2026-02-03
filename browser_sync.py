@@ -1,11 +1,13 @@
 import asyncio
 import logging
+import random
 from playwright.async_api import Page
 from connection_manager import ConnectionManager
 import database
 from datetime import datetime, timedelta
 from scrapers.playo_scraper import PlayoScraper
 from scrapers.hudle_scraper import HudleScraper
+from services.playo_booking_service import PlayoBookingService
 
 logger = logging.getLogger("BrowserSync")
 
@@ -26,6 +28,7 @@ class BrowserSync:
         self.cm = connection_manager
         self.scrape_queue = asyncio.Queue()
         self.wake_event = asyncio.Event()
+        self.INTERVAL_SECONDS = 600  # Default background sync interval (10 mins)
         self.last_scraped = {} # date_str -> datetime
         self.pending_scrapes = {} # date_str -> asyncio.Future
         self.booking_lock = SafeAsyncLock()
@@ -33,6 +36,9 @@ class BrowserSync:
         # SOLID Strategy: Scrapers handled by dedicated classes
         self.playo_scraper = PlayoScraper()
         self.hudle_scraper = HudleScraper()
+        
+        # Booking Service
+        self.playo_booking_service = PlayoBookingService()
         
         # Legacy sports list (if needed by external callers, though ideally deprecated)
         self.sports = self.playo_scraper.sports 
@@ -42,13 +48,16 @@ class BrowserSync:
         Queue a specific date for immediate scraping and wait for completion.
         """
         future = None
-        if date_str in self.pending_scrapes:
-             future = self.pending_scrapes[date_str]
+        existing = self.pending_scrapes.get(date_str)
+        
+        # If force=True OR existing future is already done, create a new one
+        if force or existing is None or existing.done():
+            future = asyncio.Future()
+            self.pending_scrapes[date_str] = future
+            await self.scrape_queue.put((date_str, force, limit_to_sports))
+            self.wake_event.set()
         else:
-             future = asyncio.Future()
-             self.pending_scrapes[date_str] = future
-             await self.scrape_queue.put((date_str, force, limit_to_sports))
-             self.wake_event.set()
+            future = existing
         
         logger.info(f"Requested immediate scrape for {date_str} (Force={force}). Waiting...")
         try:
@@ -81,20 +90,33 @@ class BrowserSync:
                 else:
                     logger.info(f"Starting availability sync for {len(scrape_requests)} dates...")
                     
-                    # 2. Dispatch to Playo
-                    if self.cm.playo_tab:
-                        # try catch block for safety so one failure doesn't stop the other
+                    # Define independent tasks with error handling
+                    async def _run_playo():
+                        if not self.cm.playo_tab: return
                         try:
-                            await self.playo_scraper.scrape(self.cm.playo_tab, scrape_requests)
+                            success = await self.playo_scraper.scrape(self.cm.playo_tab, scrape_requests)
+                            status = "success" if success else "failed"
+                            for req in scrape_requests:
+                                database.update_scrape_status("Playo", req['date'], status)
                         except Exception as e:
-                            logger.error(f"Playo scraper failed: {e}")
-                    
-                    # 3. Dispatch to Hudle
-                    if self.cm.hudle_tab:
+                            logger.error(f"Playo task failed: {e}")
+                            for req in scrape_requests:
+                                database.update_scrape_status("Playo", req['date'], "failed", str(e))
+
+                    async def _run_hudle():
+                        if not self.cm.hudle_tab: return
                         try:
                             await self.hudle_scraper.scrape(self.cm.hudle_tab, scrape_requests)
+                            # Hudle scraper swallowing errors internally usually means partial success or success
+                            for req in scrape_requests:
+                                database.update_scrape_status("Hudle", req['date'], "success")
                         except Exception as e:
-                            logger.error(f"Hudle scraper failed: {e}")
+                            logger.error(f"Hudle task failed: {e}")
+                            for req in scrape_requests:
+                                database.update_scrape_status("Hudle", req['date'], "failed", str(e))
+
+                    # Run in parallel
+                    await asyncio.gather(_run_playo(), _run_hudle())
                     
                     logger.info("Availability sync completed.")
                     
@@ -104,10 +126,14 @@ class BrowserSync:
             except Exception as e:
                 logger.error(f"Error during sync: {e}")
             
-            # Wait for event or timeout
+            # Wait for event or timeout with Jitter (Stealth)
             if not self.wake_event.is_set():
+                jitter = random.randint(-60, 60)
+                sleep_time = max(60, self.INTERVAL_SECONDS + jitter)
+                logger.info(f"Sleeping for {sleep_time}s (Jitter: {jitter}s) before next sync...")
+                
                 try:
-                    await asyncio.wait_for(self.wake_event.wait(), timeout=600)
+                    await asyncio.wait_for(self.wake_event.wait(), timeout=sleep_time)
                     logger.info("Sync woken up by event!")
                 except asyncio.TimeoutError:
                     pass
@@ -182,3 +208,134 @@ class BrowserSync:
                 if not self.pending_scrapes[date_str].done():
                     self.pending_scrapes[date_str].set_result(True)
                 del self.pending_scrapes[date_str]
+
+    async def book_slot(
+        self,
+        date_str: str,
+        time_str: str,
+        source: str,  # 'Playo' or 'Hudle'
+        sport: str,
+        court: str,
+        customer_name: str,
+        customer_phone: str,
+        customer_email: str
+    ) -> bool:
+        """
+        Books a slot on the specified platform.
+        Returns True on success, False on failure.
+        """
+        async with self.booking_lock:
+            try:
+                if source.lower() == 'playo':
+                    if not self.cm.playo_tab:
+                        logger.error("Playo tab not available for booking")
+                        return False
+                    
+                    result = await self.playo_booking_service.book_slot(
+                        page=self.cm.playo_tab,
+                        date_str=date_str,
+                        time_str=time_str,
+                        sport_name=sport,
+                        court_name=court,
+                        customer_name=customer_name,
+                        customer_phone=customer_phone,
+                        customer_email=customer_email
+                    )
+                    
+                    if result and result.get('bookingId'):
+                        # Save to local DB
+                        from database import Booking
+                        booking = Booking(
+                            date=date_str,
+                            time=time_str,
+                            source="Playo",
+                            sport=sport,
+                            court=court,
+                            status="Booked",
+                            customer_name=customer_name,
+                            customer_phone=customer_phone
+                        )
+                        database.add_booking(booking)
+                        logger.info(f"Booking successful: {result.get('bookingId')}")
+                        return True
+                    return False
+                    
+                elif source.lower() == 'hudle':
+                    # TODO: Implement Hudle booking
+                    logger.warning("Hudle booking not yet implemented")
+                    return False
+                else:
+                    logger.error(f"Unknown booking source: {source}")
+                    return False
+                    
+            except Exception as e:
+                logger.error(f"Booking failed: {e}")
+                return False
+
+    async def cancel_slot(
+        self,
+        date_str: str,
+        time_str: str,
+        source: str,
+        sport: str,
+        court: str,
+        refund_type: int = 1,
+        send_sms: bool = True
+    ) -> bool:
+        """
+        Cancels a booking on the specified platform.
+        Returns True on success, False on failure.
+        """
+        async with self.booking_lock:
+            try:
+                if source.lower() == 'playo':
+                    if not self.cm.playo_tab:
+                        logger.error("Playo tab not available for cancellation")
+                        return False
+                    
+                    # First, get the booking ID from availability API
+                    availability = await self.playo_booking_service.get_availability(
+                        self.cm.playo_tab, sport, date_str
+                    )
+                    
+                    # Find the booking ID for this slot
+                    booking_id = None
+                    slot_time_api = f"{time_str}:00"
+                    
+                    for court_data in availability.get("data", []):
+                        if court in court_data.get("courtName", "") or court_data.get("courtName", "").endswith(court):
+                            for slot in court_data.get("slots", []):
+                                if slot.get("slotTime") == slot_time_api and slot.get("status") == "Booked":
+                                    booking_id = slot.get("bookingId")
+                                    break
+                            if booking_id:
+                                break
+                    
+                    if not booking_id:
+                        logger.error(f"Could not find booking ID for {sport} {court} at {time_str}")
+                        return False
+                    
+                    logger.info(f"Found booking ID: {booking_id} - Cancelling with refund_type={refund_type}, send_sms={send_sms}")
+                    
+                    # Cancel the booking with options
+                    result = await self.playo_booking_service.cancel_booking(
+                        self.cm.playo_tab, booking_id, 
+                        refund_type=refund_type, 
+                        send_sms=send_sms
+                    )
+                    
+                    if result:
+                        logger.info(f"Booking {booking_id} cancelled successfully")
+                        return True
+                    return False
+                    
+                elif source.lower() == 'hudle':
+                    logger.warning("Hudle cancellation not yet implemented")
+                    return False
+                else:
+                    logger.error(f"Unknown cancel source: {source}")
+                    return False
+                    
+            except Exception as e:
+                logger.error(f"Cancellation failed: {e}")
+                return False

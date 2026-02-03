@@ -1,5 +1,7 @@
 import logging
+import json
 import asyncio
+import random
 from datetime import datetime
 from playwright.async_api import Page
 import database
@@ -29,87 +31,55 @@ class PlayoScraper(BaseScraper):
         """
         logger.info(f"PlayoScraper started with {len(scrape_requests)} requests.")
         
-        # Ensure we are on Calendar Page logic (Simplified from original for brevity, but retaining core check)
-        await self._ensure_calendar_page(page)
+        # Get auth token with retry (user might be logging in)
+        auth_token = None
+        max_auth_retries = 3
+        for attempt in range(max_auth_retries):
+            auth_token = await self._get_auth_token(page)
+            if auth_token:
+                break
+            if attempt < max_auth_retries - 1:
+                logger.warning(f"No auth token found, retrying in 10s ({attempt + 1}/{max_auth_retries})... Please login to Playo.")
+                await asyncio.sleep(10)
+        
+        if not auth_token:
+            logger.error("No auth token found for Playo scraping after retries. Please login to Playo.")
+            return False
+        
+        logger.info(f"Playo auth token retrieved successfully (length: {len(auth_token)})")
 
         for req in scrape_requests:
             date_str = req['date']
             limit_to_sports = req.get('limit_sports')
             
-            # --- DATE NAVIGATION ---
-            if not await self._navigate_to_date(page, date_str):
-                continue
-
-            # --- SPORT SCRAPING ---
             sports_to_scrape = self._get_sports_to_scrape(limit_to_sports)
             
             for sport in sports_to_scrape:
-                await self._scrape_sport_for_date(page, date_str, sport)
-
-    async def _ensure_calendar_page(self, page: Page):
-        try:
-            # Check for date picker VISIBILITY
-            date_picker = page.locator('.react-datepicker__input-container input')
-            is_visible = False
-            if await date_picker.count() > 0:
-                is_visible = await date_picker.first.is_visible()
-            
-            if not is_visible:
-                logger.info("Date picker not visible. Attempting to navigate to Calendar page...")
-                calendar_btn = page.locator('div[role="button"]', has_text="Calendar")
-                if await calendar_btn.count() > 0 and await calendar_btn.first.is_visible():
-                        await calendar_btn.first.click()
-                        await page.wait_for_timeout(3000)
-                else:
-                    logger.info("Calendar button hidden/missing. Trying to expand 'Schedule'...")
-                    schedule_btn = page.locator('div[role="button"]', has_text="Schedule")
-                    if await schedule_btn.count() > 0:
-                            await schedule_btn.first.click()
-                            await page.wait_for_timeout(1000)
-                            if await calendar_btn.count() > 0:
-                                await calendar_btn.first.click()
-                                await page.wait_for_timeout(3000)
-        except Exception as e:
-            logger.error(f"Error navigating to Calendar: {e}")
-
-    async def _navigate_to_date(self, page: Page, date_str: str) -> bool:
-        # Format for Playo: DD - Mon - YY
-        try:
-            dt = datetime.strptime(date_str, "%Y-%m-%d")
-            target_date_str = dt.strftime("%d - %b - %y")
-        except ValueError:
-            logger.error(f"Invalid date format: {date_str}")
-            return False
+                await self._scrape_sport_for_date_api(page, date_str, sport, auth_token)
+                # Stealth: Add random delay between requests to avoid burst pattern
+                delay = random.uniform(2, 5)
+                logger.info(f"Sleeping for {delay:.2f}s before next sport...")
+                await asyncio.sleep(delay)
         
+        return True  # Success
+
+    async def _get_auth_token(self, page: Page) -> str:
+        """Get auth token from playoAuthToken cookie."""
         try:
-            all_date_inputs = page.locator('.react-datepicker__input-container input')
-            if await all_date_inputs.count() > 0:
-                date_input = all_date_inputs.first
-                await date_input.click()
-                await date_input.fill(target_date_str)
-                await page.wait_for_timeout(500)
-                await date_input.press('Enter')
-                await page.wait_for_timeout(500)
-                await date_input.press('Tab')
-            else:
-                logger.error("Date input not found!")
-                return False
+            token = await page.evaluate("""() => {
+                const cookies = document.cookie.split(';');
+                for (const cookie of cookies) {
+                    const [name, value] = cookie.trim().split('=');
+                    if (name === 'playoAuthToken') {
+                        return decodeURIComponent(value);
+                    }
+                }
+                return null;
+            }""")
+            return token
         except Exception as e:
-            logger.error(f"Failed to change date: {e}")
-            return False
-            
-        # Verify
-        for _ in range(3):
-            await page.wait_for_timeout(2000)
-            current_page_date = await page.evaluate('''() => {
-                const input = document.querySelector('.react-datepicker__input-container input');
-                return input ? input.value : null;
-            }''')
-            if current_page_date and current_page_date.replace(" ", "") == target_date_str.replace(" ", ""):
-                return True
-        
-        logger.error(f"Failed to verify date switch to {target_date_str}")
-        return False
+            logger.error(f"Error getting auth token: {e}")
+            return None
 
     def _get_sports_to_scrape(self, limit_to_sports):
         if not limit_to_sports:
@@ -118,185 +88,105 @@ class PlayoScraper(BaseScraper):
         filtered = [s for s in self.sports if s['name'].lower() in limit_lower]
         return filtered if filtered else self.sports
 
-    async def _scrape_sport_for_date(self, page: Page, date_str: str, sport: dict):
+    async def _scrape_sport_for_date_api(self, page: Page, date_str: str, sport: dict, auth_token: str):
+        """
+        Scrapes slot data using the Playo Availability API.
+        This is much more reliable than DOM parsing.
+        """
         try:
-            # Select Sport
-            select_selector = "select[id*='SelectField']"
-            await page.select_option(select_selector, value=sport['value']) 
-            await page.wait_for_timeout(1500)
+            sport_name = sport['name']
+            activity_id = int(sport['value'])
             
-            # Execute JS Scraper (The big blob)
-            sport_name_js = sport['name'] 
-            # Note: I am not pasting the entire JS blob here to save context size, 
-            # I will use a simplified reference or need to copy it fully if we want it to work.
-            # IMPORTANT: I MUST provide the JS logic.
+            # Call the availability API
+            url = "https://api.playo.io/controller/ppc/availability"
+            headers = {
+                "accept": "application/json",
+                "authorization": auth_token,
+                "content-type": "application/json",
+            }
+            body = {
+                "activityIds": [activity_id],
+                "activityStartDate": date_str,
+                "activityEndDate": date_str,
+                "customerStatus": 0
+            }
             
-            js_script = ''' (sportName) => {
-                const debug = [];
-                const results = [];
-                
-                // ... (Original JS Logic Omitted for Brevity in this specific tool call, BUT REQUIRED) ...
-                // Re-implementing the robust scraper logic
-                
-                const timePattern = /(\\d{1,2}):(\\d{2})\\s*-\\s*\\d{1,2}:\\d{2}\\s*(AM|PM)/i;
-                let extractedDate = null;
-                const dateInput = document.querySelector('.react-datepicker__input-container input');
-                if (dateInput) extractedDate = dateInput.value;
-
-                let rows = [];
-                let headerMap = [];
-                
-                const tables = Array.from(document.querySelectorAll('table'));
-                let targetTable = null;
-                 if (tables.length > 0) {
-                     targetTable = tables.sort((a, b) => b.querySelectorAll('tr').length - a.querySelectorAll('tr').length)[0];
-                 }
-                 
-                 if (targetTable) {
-                    const tableHeaderRow = targetTable.querySelector('thead tr') || targetTable.querySelector('tr');
-                    if (tableHeaderRow) headerMap = Array.from(tableHeaderRow.children).map((c, i) => ({index: i, name: c.innerText.trim()}));
-                    rows = Array.from(targetTable.querySelectorAll('tbody tr'));
-                    if (rows.length === 0) rows = Array.from(targetTable.querySelectorAll('tr'));
-                 } else {
-                     rows = Array.from(document.querySelectorAll('tr'));
-                 }
-
-                function to24h(h, m, amp) {
-                    let hour = parseInt(h);
-                    const min = m;
-                    const ampm = amp.toUpperCase();
-                    if (ampm === "PM" && hour < 12) hour += 12;
-                    if (ampm === "AM" && hour === 12) hour = 0;
-                    return hour.toString().padStart(2, '0') + ":" + min;
-                }
-                
-                const capturePattern = /(\\d{1,2}):(\\d{2})(?:\\s*[a-zA-Z]{2})?\\s*-\\s*(\\d{1,2}):(\\d{2})\\s*([a-zA-Z]{2})/i;
-                
-                rows.forEach(row => {
-                     if (row.children.length > 0) {
-                         let match = null;
-                         let timeColIndex = -1;
-                         const cells = Array.from(row.children);
-                         
-                         for(let i=0; i<Math.min(3, cells.length); i++) {
-                             const txt = cells[i].textContent.trim();
-                             match = txt.match(capturePattern);
-                             if(match) {
-                                 timeColIndex = i;
-                                 break;
-                             }
-                         }
-
-                         if (match) {
-                             const fullStr = match[0];
-                             const parts = fullStr.split('-');
-                             const startPart = parts[0].trim();
-                             const endPart = parts[1].trim();
-                             const startMatch = startPart.match(/(\\d{1,2}):(\\d{2})/);
-                             const endMatch = endPart.match(/([a-zA-Z]{2})/); 
-                             
-                             if (startMatch && endMatch) {
-                                 const h = startMatch[1];
-                                 const m = startMatch[2];
-                                 let effectiveAMPM = endMatch[1];
-                                 const startAMPM = startPart.match(/([a-zA-Z]{2})/);
-                                 if(startAMPM) effectiveAMPM = startAMPM[1];
-
-                                 const startTime24 = to24h(h, m, effectiveAMPM);
-                                 
-                                 cells.forEach((cell, idx) => {
-                                     if (idx <= timeColIndex) return;
-
-                                     let colName = "Unknown";
-                                     if (headerMap.length > 0) {
-                                         const h = headerMap.find(hm => hm.index === idx);
-                                         if (h) colName = h.name;
-                                     }
-                                      // Rename courts
-                                      if (sportName.includes("Snooker") || sportName.includes("Pool") || sportName.includes("Table Tennis")) {
-                                            colName = colName.replace(/Court/i, "Table");
-                                        } else if (sportName.includes("Football") || sportName.includes("Cricket")) {
-                                            colName = colName.replace(/Court/i, "Turf");
-                                            colName = colName.replace(/Table/i, "Turf"); 
-                                        }
-
-                                     const btnTexts = Array.from(cell.querySelectorAll('button, [role="button"], .btn')).map(b => b.textContent.trim().toLowerCase());
-                                     const cellText = cell.innerText.trim().toLowerCase();
-                                     let status = null;
-
-                                     if (btnTexts.some(t => t.includes('book') || t.includes('block') || t.includes('₹'))) {
-                                         status = "Available";
-                                     } else if (btnTexts.some(t => t.includes('locked'))) {
-                                         status = "Locked";
-                                     } else if (cellText === 'booked' || cellText === 'full' || cellText.includes('locked')) {
-                                         status = "Booked";
-                                     } else if (cell.innerText.length > 3 && !cell.innerText.includes('₹')) {
-                                          status = "Booked"; // Name fallback
-                                     }
-
-                                     if (status) {
-                                         if (colName === "Unknown") colName = "Court " + (idx - timeColIndex);
-                                         results.push({
-                                             time: startTime24, 
-                                             court: colName,
-                                             status: status,
-                                             date: extractedDate 
-                                         });
-                                     }
-                                 });
-                             }
-                         }
-                     }
-                });
-
-                // Deduplicate
-                const unique = [];
-                const seen = new Set();
-                results.forEach(r => {
-                    const key = r.time + "|" + r.court;
-                    if(!seen.has(key)) {
-                        unique.push(r);
-                        seen.add(key);
-                    }
-                });
-                return { results: unique, debug: debug };
-            }'''
+            response = await page.request.post(url, headers=headers, data=json.dumps(body))
             
-            evaluation_result = await page.evaluate(js_script, sport_name_js)
-            scraped_data = evaluation_result.get('results', [])
-            
-            # Helper Nested
-            def parse_playo_date(date_str):
-                 if not date_str: return None
-                 try:
-                     clean = date_str.replace(" ", "")
-                     dt = datetime.strptime(clean, "%d-%b-%y")
-                     return dt.strftime("%Y-%m-%d")
-                 except ValueError:
-                      return None
-
-            if not scraped_data:
+            if not response.ok:
+                logger.error(f"Playo API failed for {sport_name}: {response.status}")
+                error_text = await response.text()
+                logger.error(f"Error response: {error_text[:500]}")
                 return
-
-            page_date_parsed = parse_playo_date(scraped_data[0].get('date'))
-            if page_date_parsed != date_str:
-                logger.warning(f"Date Mismatch in scraping: Requested {date_str}, got {page_date_parsed}")
-
-            # Bulk Save
-            slots_to_save = []
-            for slot in scraped_data:
-                slots_to_save.append({
-                    "date": page_date_parsed or date_str, # Fallback to requested date if parse fails
-                    "time": slot['time'],
-                    "source": "Playo",
-                    "sport": sport['name'],
-                    "court": slot['court'],
-                    "status": slot['status']
-                })
             
-            if slots_to_save:
-                await database.save_booked_slots_playo(slots_to_save)
-                logger.info(f"Saved {len(slots_to_save)} slots for Playo {date_str} ({sport['name']})")
-
+            data = await response.json()
+            
+            # Log response details
+            court_count = len(data.get("data", []))
+            logger.info(f"API response for {sport_name}: {court_count} courts returned")
+            
+            # Parse API response into slot format
+            slots_to_save = []
+            for court in data.get("data", []):
+                court_name = court.get("courtName", "Unknown")
+                
+                # Simplify court name (e.g., "Badminton Synthetic Court 1" -> "Court 1")
+                simple_court_name = court_name
+                if sport_name in court_name:
+                    simple_court_name = court_name.replace(sport_name + " ", "")
+                
+                # Football/Cricket -> Turf (standardize with Hudle)
+                if "Football" in sport_name or "Cricket" in sport_name:
+                    # Always use "Turf 1" for single turf sports
+                    simple_court_name = "Turf 1"
+                
+                # Snooker -> Table 1 (standardize with Hudle)
+                elif "Snooker" in sport_name:
+                    # Match Hudle format: "Table 1" for Snooker AND Snooker Pro
+                    simple_court_name = "Table 1"
+                
+                # Pool -> Table X (standardize with Hudle)
+                elif "Pool" in sport_name:
+                    # Keep court number for Pool tables
+                    simple_court_name = simple_court_name.replace("Court", "Table")
+                
+                for slot in court.get("slots", []):
+                    slot_time = slot.get("slotTime", "")  # "HH:MM:SS"
+                    
+                    # Convert to "HH:MM" format
+                    time_24 = slot_time[:5] if slot_time else "00:00"
+                    
+                    # Determine status from API response
+                    available = slot.get("available", 0)
+                    blocked = slot.get("blocked", False)
+                    status_str = slot.get("status", "")
+                    customer_name = slot.get("customerName", "")
+                    
+                    if blocked:
+                        status = "Locked"
+                    elif available == 1 and status_str == "Book":
+                        status = "Available"
+                    elif status_str == "Booked" or customer_name:
+                        status = "Booked"
+                    else:
+                        status = "Available"  # Default
+                    
+                    slots_to_save.append({
+                        "date": date_str,
+                        "time": time_24,
+                        "source": "Playo",
+                        "sport": sport_name,
+                        "court": simple_court_name,
+                        "status": status
+                    })
+            
+            if not slots_to_save:
+                logger.warning(f"No slots found for {sport_name} on {date_str}")
+                return
+            
+            # Save to database
+            await database.save_booked_slots_playo(slots_to_save)
+            logger.info(f"Saved {len(slots_to_save)} slots for Playo {date_str} ({sport_name})")
+            
         except Exception as e:
-            logger.error(f"Error extracting data for {sport['name']}: {e}")
+            logger.error(f"Error scraping {sport['name']}: {e}")
